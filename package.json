@@ -1,0 +1,13 @@
+{
+  "name": "m3u8-web-downloader",
+  "version": "1.0.0",
+  "description": "Web based M3U8 Downloader with SSE",
+  "main": "server.js",
+  "scripts": {
+    "start": "npx nodemon server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "uuid": "^9.0.1"
+  }
+}

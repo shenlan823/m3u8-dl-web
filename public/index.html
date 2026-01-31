@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Vue M3U8 下载器</title>
+	<script src="https://cdn.tailwindcss.com"></script>
+	<script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+	<style>
+		::-webkit-scrollbar {
+			width: 6px;
+			height: 6px;
+		}
+
+		::-webkit-scrollbar-thumb {
+			background: #cbd5e1;
+			border-radius: 4px;
+		}
+
+		.status-transition {
+			transition: background-color 0.3s ease;
+		}
+	</style>
+</head>
+
+<body class="bg-gray-100 min-h-screen text-gray-800">
+
+	<div id="app" class="p-4 md:p-8 max-w-7xl mx-auto space-y-6">
+
+		<!-- 头部 -->
+		<div class="bg-white rounded-xl shadow-sm p-6 border border-gray-100">
+			<h1 class="text-2xl font-bold text-gray-800 mb-4">M3U8 下载控制台</h1>
+			<div class="flex gap-3">
+				<input v-model="inputUrl" @keyup.enter="addUrl" type="text" placeholder="输入 M3U8 链接"
+					class="flex-1 p-3 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+				<button @click="addUrl" :disabled="!inputUrl"
+					class="bg-blue-600 text-white px-8 py-3 rounded-lg hover:bg-blue-700 disabled:opacity-50">添加任务</button>
+			</div>
+		</div>
+
+		<div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+			<!-- 左侧：主面板 (显示当前选中的任务详情) -->
+			<div class="lg:col-span-2">
+				<div v-if="viewingJob.id"
+					class="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden sticky top-6">
+					<!-- 顶部信息 -->
+					<div class="p-6 border-b bg-gray-50/50">
+						<div class="flex justify-between items-start mb-4">
+							<div>
+								<div class="flex items-center gap-2">
+									<span v-if="viewingJob.id === activeJobId"
+										class="bg-blue-100 text-blue-700 text-xs px-2 py-0.5 rounded font-bold">运行中</span>
+									<span v-else
+										class="bg-gray-200 text-gray-600 text-xs px-2 py-0.5 rounded font-bold">历史记录</span>
+									<h2 class="text-lg font-bold">任务详情</h2>
+								</div>
+								<p class="text-xs text-gray-500 truncate mt-1 max-w-md"
+									:title="viewingJob.url">{{ viewingJob.url }}</p>
+							</div>
+							<div class="text-right">
+								<div
+									class="text-3xl font-black text-blue-600 font-mono">
+									{{ progressPercent }}%</div>
+								<div class="text-xs text-gray-400">成功: {{ successCount
+									}} / {{ totalSegments }}</div>
+							</div>
+						</div>
+
+						<!-- 进度条 -->
+						<div class="w-full bg-gray-200 rounded-full h-2.5 mb-4">
+							<div class="h-2.5 rounded-full transition-all duration-300"
+								:class="isCompleted ? 'bg-green-500' : 'bg-blue-600'"
+								:style="{ width: progressPercent + '%' }"></div>
+						</div>
+
+						<!-- 操作 -->
+						<div class="flex justify-between items-center">
+							<div class="text-xs text-gray-500">
+								提示: 点击红色方块可手动重试
+							</div>
+							<button @click="forceMerge"
+								class="text-xs bg-amber-100 text-amber-700 px-3 py-1.5 rounded hover:bg-amber-200 border border-amber-200">
+								强制合并
+							</button>
+						</div>
+					</div>
+
+					<!-- 网格 -->
+					<!-- 修改 HTML 中的网格显示逻辑 -->
+					<div class="p-1 max-h-[400px] overflow-y-auto bg-gray-50/50">
+						<!-- 情况1: 有分片数据，正常显示网格 -->
+						<div v-if="segments.length > 0"
+							class="grid grid-cols-[repeat(auto-fill,minmax(12px,1fr))] gap-[2px] p-2">
+							<div v-for="seg in segments" :key="seg.index"
+								:title="`分片 #${seg.index}\n状态: ${seg.status}`"
+								@click="handleSegmentClick(seg)"
+								class="h-3 rounded-[2px] status-transition cursor-default"
+								:class="{
+					                'bg-gray-200': seg.status === 'pending' || seg.status === 'retry',
+					                'bg-blue-500 animate-pulse': seg.status === 'downloading',
+					                'bg-green-500': seg.status === 'success',
+					                'bg-red-500 cursor-pointer hover:ring-2 ring-red-300': seg.status === 'failed'
+					            }"></div>
+						</div>
+
+						<!-- 情况2: 没分片，但是状态是等待重试（说明解析就挂了） -->
+						<div v-else-if="viewingJob.status === 'waiting_retry' || viewingJob.status === 'error'"
+							class="flex flex-col items-center justify-center py-10 text-gray-500 gap-3">
+							<div class="text-4xl">⚠️</div>
+							<p>任务初始化/解析失败</p>
+							<p class="text-xs text-gray-400">未能获取分片列表，可能是网络问题或链接无效</p>
+							<button @click="restartJob"
+								class="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700 transition">
+								🔄 重新开始任务
+							</button>
+						</div>
+
+						<!-- 情况3: 没分片，是其他状态 -->
+						<div v-else class="text-center py-10 text-gray-400 text-sm">
+							<span v-if="viewingJob.url === 'Loading...'">正在加载任务信息...</span>
+							<span v-else>等待解析分片列表...</span>
+						</div>
+					</div>
+
+					<!-- 日志 -->
+					<div class="bg-gray-900 text-gray-300 text-xs font-mono p-4 h-40 overflow-y-auto border-t border-gray-800"
+						ref="logContainer">
+						<div v-for="(log, idx) in logs" :key="idx" class="mb-1 break-all"
+							:class="{'text-red-400': log.isError, 'text-green-400': log.isSuccess}">
+							<span class="opacity-50">[{{ log.time }}]</span> {{ log.text }}
+						</div>
+					</div>
+				</div>
+
+				<div v-else
+					class="bg-white rounded-xl shadow-sm p-12 text-center border border-dashed border-gray-300">
+					<div class="text-4xl mb-4">👈</div>
+					<p class="text-gray-500">请从右侧列表选择一个任务查看详情</p>
+				</div>
+			</div>
+
+			<!-- 右侧：列表区 -->
+			<div class="space-y-6">
+
+				<!-- 等待队列 -->
+				<div class="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+					<div
+						class="p-3 bg-gray-50 font-bold text-sm text-gray-700 border-b flex justify-between">
+						<span>⏳ 等待队列</span>
+						<span class="bg-blue-100 text-blue-800 text-xs px-2 rounded-full">{{
+							queue.length }}</span>
+					</div>
+					<ul class="max-h-60 overflow-y-auto">
+						<li v-for="(item, idx) in queue" :key="item.id"
+							class="p-3 border-b last:border-0 hover:bg-gray-50 text-sm">
+							<div class="font-medium truncate text-gray-600">ID: {{
+								item.id.slice(-4) }}</div>
+							<div class="text-xs text-gray-400 truncate">{{ item.url }}</div>
+						</li>
+						<li v-if="queue.length === 0"
+							class="p-4 text-center text-gray-400 text-xs">空</li>
+					</ul>
+				</div>
+
+				<!-- 历史记录 (包含 Active) -->
+				<div class="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+					<div class="p-3 bg-gray-50 font-bold text-sm text-gray-700 border-b">
+						📜 任务列表 (含历史)
+					</div>
+					<ul class="max-h-[500px] overflow-y-auto">
+						<!-- 如果有正在运行的，手动置顶显示 -->
+						<li v-if="activeJobId" @click="loadJobDetails(activeJobId)"
+							class="p-3 border-b border-blue-100 bg-blue-50 cursor-pointer hover:bg-blue-100 transition relative">
+							<div
+								class="absolute right-2 top-2 w-2 h-2 bg-green-500 rounded-full animate-ping">
+							</div>
+							<div class="font-bold text-blue-700 text-sm">Running: {{
+								activeJobId.slice(-4) }}</div>
+							<div class="text-xs text-blue-600 mt-1">点击查看实时进度</div>
+						</li>
+
+						<!-- 历史列表 -->
+						<li v-for="h in history" :key="h.id"
+							class="p-3 border-b last:border-0 hover:bg-gray-50 transition group flex justify-between items-start"
+							:class="{'bg-gray-100': viewingJob.id === h.id}">
+
+							<!-- 左侧内容区域 (点击查看详情) -->
+							<div @click="loadJobDetails(h.id)"
+								class="cursor-pointer flex-1">
+								<div class="flex items-center gap-2 mb-1">
+									<span class="font-medium text-sm text-gray-700">{{
+										h.id.slice(-4) }}</span>
+
+									<!-- 状态徽标：如果是 completed 显示绿色，否则根据成功数显示 -->
+									<span class="text-xs px-1.5 rounded"
+										:class="h.status === 'completed' || (h.successCount === h.totalCount && h.totalCount > 0) ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'">
+										{{ h.status === 'completed' ? '完成' :
+										h.successCount + '/' + h.totalCount }}
+									</span>
+								</div>
+								<div class="text-xs text-gray-400 truncate w-48">{{
+									h.url }}</div>
+							</div>
+
+							<!-- 右侧按钮组 (默认隐藏，hover显示) -->
+							<div
+								class="flex gap-1 opacity-0 group-hover:opacity-100 transition items-center">
+
+								<!-- 重新下载按钮 -->
+								<button @click.stop="triggerRestart(h.id)"
+									title="重新下载 (清空进度)"
+									class="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-md transition">
+									<svg xmlns="http://www.w3.org/2000/svg"
+										class="h-4 w-4" fill="none"
+										viewBox="0 0 24 24"
+										stroke="currentColor">
+										<path stroke-linecap="round"
+											stroke-linejoin="round"
+											stroke-width="2"
+											d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+									</svg>
+								</button>
+
+								<!-- 删除按钮 -->
+								<button @click.stop="deleteJob(h.id)" title="删除任务"
+									class="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-md transition">
+									<svg xmlns="http://www.w3.org/2000/svg"
+										class="h-4 w-4" fill="none"
+										viewBox="0 0 24 24"
+										stroke="currentColor">
+										<path stroke-linecap="round"
+											stroke-linejoin="round"
+											stroke-width="2"
+											d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+									</svg>
+								</button>
+							</div>
+						</li>
+					</ul>
+				</div>
+
+			</div>
+		</div>
+	</div>
+
+	<script>
+		const { createApp } = Vue;
+
+		createApp({
+			data() {
+				return {
+					inputUrl: '',
+					queue: [],
+					history: [],
+					activeJobId: null, // 当前服务器正在跑的任务ID
+
+					// 当前正在查看的任务（可能是正在跑的，也可能是历史的）
+					viewingJob: { id: null, url: '' },
+					segments: [],
+					logs: []
+				}
+			},
+			computed: {
+				totalSegments() { return this.segments.length; },
+				successCount() { return this.segments.filter(s => s.status === 'success').length; },
+				progressPercent() {
+					if (this.totalSegments === 0) return 0;
+					return ((this.successCount / this.totalSegments) * 100).toFixed(1);
+				},
+				isCompleted() { return this.totalSegments > 0 && this.successCount === this.totalSegments; }
+			},
+			mounted() {
+				this.initSSE();
+			},
+			methods: {
+				initSSE() {
+					const evtSource = new EventSource("/api/events");
+					evtSource.onmessage = (event) => {
+						const msg = JSON.parse(event.data);
+
+						// 1. 队列与状态更新
+						if (msg.type === 'queue-update') {
+							this.queue = msg.data.queue;
+							this.history = msg.data.history;
+							this.activeJobId = msg.data.activeId;
+
+							// 第一次加载，如果没有正在看的，且有正在跑的，自动选中正在跑的
+							if (!this.viewingJob.id && this.activeJobId) {
+								this.loadJobDetails(this.activeJobId);
+							}
+						}
+						// 2. 新任务开始
+						else if (msg.type === 'job-start') {
+							// 如果用户正在看旧任务，可以不打断；或者提示。
+							// 这里选择：自动切换到新任务
+							this.activeJobId = msg.data.id;
+							this.loadJobDetails(msg.data.id);
+						}
+						// 3. 日志 (只有当查看的任务 ID 匹配日志的 JobID 时才处理)
+						else if (msg.event === 'log') {
+							const payload = msg.payload;
+							if (payload.jobId !== this.viewingJob.id) return;
+
+							this.processLog(payload);
+						}
+					};
+				},
+
+				// 加载任务详情（无论是正在运行还是历史）
+				// 修改 loadJobDetails，增加 status 的保存
+				async loadJobDetails(id) {
+					if (this.viewingJob.id === id) return;
+
+					this.viewingJob = { id, url: 'Loading...', status: '' }; // 初始化 status
+					this.segments = [];
+					this.logs = [];
+
+					try {
+						const res = await fetch(`/api/job/${id}`);
+						if (!res.ok) throw new Error("Load failed");
+						const data = await res.json();
+
+						// 绑定更多数据
+						this.viewingJob = { id: data.id, url: data.url, status: data.status };
+						this.segments = data.segments || []; // 防止 null
+
+						this.addLog(`已加载任务详情: ${id}`);
+
+						// 针对解析失败的情况增加日志提示
+						if (this.segments.length === 0 && (data.status === 'waiting_retry' || data.status === 'error')) {
+							this.addLog("错误: M3U8 解析失败，未找到分片。请点击重试按钮。", true);
+						}
+					} catch (e) {
+						this.addLog("加载任务详情失败", true);
+					}
+				},
+
+				// 1. 新增通用重启方法
+				async triggerRestart(id) {
+					if (!confirm('确定要重新下载吗？\n这将清空旧文件并从头开始。')) return;
+
+					// UI 立即反馈（如果正在查看该任务）
+					if (this.viewingJob.id === id) {
+						this.addLog("正在发送重置请求...");
+					}
+
+					try {
+						const res = await fetch('/api/restart', {
+							method: 'POST',
+							headers: { 'Content-Type': 'application/json' },
+							body: JSON.stringify({ jobId: id })
+						});
+
+						if (res.ok) {
+							this.addLog(`任务 ${id.slice(-4)} 已重置并加入队列`);
+
+							// 如果列表里有正在查看的任务，可能需要刷新一下状态
+							// SSE 会处理大部分更新，但我们可以手动让 viewingJob 变更为 loading
+							if (this.viewingJob.id === id) {
+								this.viewingJob.status = 'queued';
+								this.segments = [];
+							}
+						} else {
+							alert("重置请求失败");
+						}
+					} catch (e) {
+						alert("网络请求错误");
+					}
+				},
+
+				// 2. 修改原本详情页的 restartJob 方法，让它调用上面的通用方法
+				async restartJob() {
+					if (!this.viewingJob.id) return;
+					// 直接调用上面的方法
+					await this.triggerRestart(this.viewingJob.id);
+				},
+
+				async deleteJob(id) {
+					if (!confirm('确定要删除该任务记录及所有下载文件吗？此操作不可恢复。')) return;
+
+					// 如果正在查看这个要删除的任务，先清空面板
+					if (this.viewingJob.id === id) {
+						this.viewingJob = { id: null, url: '' };
+						this.segments = [];
+						this.logs = [];
+					}
+
+					try {
+						const res = await fetch(`/api/job/${id}`, { method: 'DELETE' });
+						const data = await res.json();
+
+						if (res.ok) {
+							this.addLog(`任务 ${id} 已删除`);
+							// SSE 会自动更新列表，无需手动操作
+						} else {
+							alert(data.error || '删除失败');
+						}
+					} catch (e) {
+						alert('网络请求失败');
+					}
+				},
+
+				processLog(payload) {
+					switch (payload.type) {
+						case 'init-segments':
+							this.segments = payload.data;
+							break;
+						case 'segment-update':
+							// 局部更新，高性能
+							const idx = this.segments.findIndex(s => s.index === payload.data.index);
+							if (idx !== -1) this.segments[idx] = payload.data;
+							break;
+						case 'info': this.addLog(payload.data); break;
+						case 'error': this.addLog(payload.data, true); break;
+						case 'done': this.addLog(`完成。输出: ${payload.data.outputFile}`, false, true); break;
+					}
+				},
+
+				async addUrl() {
+					if (!this.inputUrl) return;
+					await fetch('/api/add', {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({ url: this.inputUrl })
+					});
+					this.inputUrl = '';
+				},
+
+				handleSegmentClick(seg) {
+					if (seg.status === 'failed') {
+						this.retrySegment(seg.index);
+					}
+				},
+
+				async retrySegment(index) {
+					if (!this.viewingJob.id) return;
+
+					// UI 乐观更新
+					const idx = this.segments.findIndex(s => s.index === index);
+					if (idx !== -1) this.segments[idx].status = 'downloading';
+
+					this.addLog(`请求重试分片 #${index}`);
+
+					await fetch('/api/retry-segment', {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({ jobId: this.viewingJob.id, segmentIndex: index })
+					});
+				},
+
+				async forceMerge() {
+					if (!confirm('确定要强制合并吗？')) return;
+					await fetch('/api/force-merge', {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({ jobId: this.viewingJob.id })
+					});
+				},
+
+				addLog(text, isError = false, isSuccess = false) {
+					this.logs.push({ time: new Date().toLocaleTimeString(), text, isError, isSuccess });
+					this.$nextTick(() => {
+						const c = this.$refs.logContainer;
+						if (c) c.scrollTop = c.scrollHeight;
+					});
+				}
+			}
+		}).mount('#app');
+	</script>
+</body>
+
+</html>
