@@ -1,6 +1,7 @@
 bak/
 node_modules/
 data.json
+downloads/
 
 
 .DS_Store
